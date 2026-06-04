@@ -27,6 +27,13 @@ app.use(cors({
 }));
 app.use(express.json());
 
+// Catch malformed JSON bodies (e.g. literal "null" sent by axios when data=null)
+app.use((err, req, res, next) => {
+  if (err.type === 'entity.parse.failed')
+    return res.status(400).json({ error: 'Invalid JSON body' });
+  next(err);
+});
+
 // ── DATABASE ──────────────────────────────────────────────────
 db.exec(`
   CREATE TABLE IF NOT EXISTS license_keys (
@@ -263,8 +270,7 @@ app.post('/bot/bulkgen', requireBotSecret, (req, res) => {
   res.json({ success: true, keys, plan, amount: keys.length });
 });
 
-// GET /bot/keyinfo/by-discord/:discord_id  ← MUST be before /bot/keyinfo/:key
-// Lookup a license by Discord user ID (for !lookup command)
+// !! MUST be defined before /bot/keyinfo/:key — Express matches top-to-bottom
 app.get('/bot/keyinfo/by-discord/:discord_id', requireBotSecret, (req, res) => {
   const row = db.prepare(
     'SELECT * FROM license_keys WHERE discord_id = ? ORDER BY redeemed_at DESC LIMIT 1'

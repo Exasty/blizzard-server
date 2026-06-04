@@ -19,7 +19,7 @@ const crypto   = require('crypto');
 const app = express();
 
 const PORT       = process.env.PORT       || 8000;
-const BOT_SECRET = process.env.BOT_SECRET || 'change-this-secret-123';
+const BOT_SECRET = process.env.BOT_SECRET || 'mEreY3QpPbyzZJgqYPrHtTG$p2wByHv';
 
 // ⚠️  THIS MUST MATCH BlizzardAuth.java MOD_SECRET EXACTLY
 const MOD_SECRET = process.env.MOD_SECRET || 'mgvSs0NvrAqFubgMpdEaXS1TFNz2W3GDJcJGA6Tu8qz3Am3V7GaS8gfnDWqZrDK7';

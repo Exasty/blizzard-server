@@ -25,7 +25,7 @@ const BOT_SECRET = process.env.BOT_SECRET || 'change-this-secret-123';
 const MOD_SECRET = process.env.MOD_SECRET || 'mgvSs0NvrAqFubgMpdEaXS1TFNz2W3GDJcJGA6Tu8qz3Am3V7GaS8gfnDWqZrDK7';
 
 const DB_PATH      = process.env.DB_PATH      || path.join('/tmp', 'blizzard.db');
-const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || path.join('/tmp', 'downloads');
+const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || path.join(__dirname, 'downloads');
 
 const db = new Database(DB_PATH);
 

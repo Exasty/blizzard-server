@@ -25,13 +25,13 @@ app.use(cors({
     'http://127.0.0.1:5500'
   ]
 }));
-app.use(express.json());
-
-// Catch malformed JSON bodies (e.g. literal "null" sent by axios when data=null)
-app.use((err, req, res, next) => {
-  if (err.type === 'entity.parse.failed')
-    return res.status(400).json({ error: 'Invalid JSON body' });
-  next(err);
+app.use((req, res, next) => {
+  const ct = req.headers['content-type'] || '';
+  if (!ct.includes('application/json')) return next();
+  express.json()(req, res, (err) => {
+    if (err) return res.status(400).json({ error: 'Invalid JSON body' });
+    next();
+  });
 });
 
 // ── DATABASE ──────────────────────────────────────────────────

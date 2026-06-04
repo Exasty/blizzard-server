@@ -1,12 +1,6 @@
 // ═══════════════════════════════════════════════════════════════
 //  BLIZZARD BACKEND  —  server.js
-//  npm install express cors better-sqlite3
-//
-//  ENV VARS (set in Railway/Render/Fly.io):
-//    PORT        — optional, defaults to 8000
-//    BOT_SECRET  — secret header for Discord bot routes
-//    MOD_SECRET  — MUST exactly match BlizzardAuth.java MOD_SECRET
-//    DB_PATH     — optional, defaults to /tmp/blizzard.db
+//  npm install express cors better-sqlite3 uuid adm-zip
 // ═══════════════════════════════════════════════════════════════
 
 const express  = require('express');
@@ -15,45 +9,38 @@ const Database = require('better-sqlite3');
 const path     = require('path');
 const fs       = require('fs');
 const crypto   = require('crypto');
+const AdmZip   = require('adm-zip');
 
 const app = express();
+const db  = new Database('blizzard.db');
 
-const PORT       = process.env.PORT       || 8000;
-const BOT_SECRET = process.env.BOT_SECRET || 'mEreY3QpPbyzZJgqYPrHtTG$p2wByHv';
-
-// ⚠️  THIS MUST MATCH BlizzardAuth.java MOD_SECRET EXACTLY
+const PORT       = process.env.PORT || 8000;
+const BOT_SECRET = process.env.BOT_SECRET || 'change-this-secret-123';
 const MOD_SECRET = process.env.MOD_SECRET || 'mgvSs0NvrAqFubgMpdEaXS1TFNz2W3GDJcJGA6Tu8qz3Am3V7GaS8gfnDWqZrDK7';
+const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
 
-const DB_PATH      = process.env.DB_PATH      || path.join('/tmp', 'blizzard.db');
-const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || path.join(__dirname, 'downloads');
-
-const db = new Database(DB_PATH);
-
-// ── MIDDLEWARE ─────────────────────────────────────────────────
-// Allow all origins for /mod-auth so the Minecraft mod (not a browser) can reach it
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, X-Bot-Secret');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
-  next();
-});
-
+app.use(cors({
+  origin: [
+    'https://blizzardclient.netlify.app',
+    'http://localhost:3000',
+    'http://127.0.0.1:5500'
+  ]
+}));
 app.use(express.json());
 
-// ── DATABASE ───────────────────────────────────────────────────
+// ── DATABASE ──────────────────────────────────────────────────
 db.exec(`
   CREATE TABLE IF NOT EXISTS license_keys (
-    key              TEXT PRIMARY KEY,
-    plan             TEXT NOT NULL,
-    expires_at       TEXT,
-    used             INTEGER DEFAULT 0,
-    discord_id       TEXT UNIQUE,
-    redeemed_at      TEXT,
-    created_at       TEXT NOT NULL,
-    note             TEXT,
-    hwid             TEXT,
-    hwid_locked_at   TEXT,
+    key             TEXT PRIMARY KEY,
+    plan            TEXT NOT NULL,
+    expires_at      TEXT,
+    used            INTEGER DEFAULT 0,
+    discord_id      TEXT,
+    redeemed_at     TEXT,
+    created_at      TEXT NOT NULL,
+    note            TEXT,
+    hwid            TEXT,
+    hwid_locked_at  TEXT,
     hwid_reset_count INTEGER DEFAULT 0,
     hwid_reset_month TEXT
   );
@@ -66,22 +53,18 @@ db.exec(`
   );
 
   CREATE TABLE IF NOT EXISTS auth_log (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    discord_id TEXT NOT NULL,
-    hwid       TEXT NOT NULL,
-    result     TEXT NOT NULL,
-    ip         TEXT,
-    timestamp  TEXT NOT NULL
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_used  TEXT NOT NULL,
+    hwid      TEXT NOT NULL,
+    result    TEXT NOT NULL,
+    ip        TEXT,
+    timestamp TEXT NOT NULL
   );
 `);
 
-// ── HELPERS ────────────────────────────────────────────────────
-function sha256(str) {
-  return crypto.createHash('sha256').update(str, 'utf8').digest('hex');
-}
-
+// ── HELPERS ───────────────────────────────────────────────────
 function generateKey(plan) {
-  const seg    = () => crypto.randomBytes(2).toString('hex').toUpperCase();
+  const seg    = () => Math.random().toString(16).slice(2, 6).toUpperCase();
   const prefix = plan === 'lifetime' ? 'BLZLT' : 'BLZMN';
   return `${prefix}-${seg()}-${seg()}-${seg()}-${seg()}`;
 }
@@ -93,7 +76,6 @@ function addMonths(date, n) {
 }
 
 function isExpired(row) {
-  if (!row) return true;
   if (row.plan === 'lifetime') return false;
   if (!row.expires_at) return false;
   return new Date(row.expires_at) < new Date();
@@ -105,14 +87,10 @@ function requireBotSecret(req, res, next) {
   next();
 }
 
-function logAuth(discordId, hwid, result, ip) {
-  try {
-    db.prepare(
-      'INSERT INTO auth_log (discord_id, hwid, result, ip, timestamp) VALUES (?, ?, ?, ?, ?)'
-    ).run(discordId, hwid, result, ip || 'unknown', new Date().toISOString());
-  } catch (e) {
-    console.error('[logAuth error]', e.message);
-  }
+function logAuth(key, hwid, result, ip) {
+  db.prepare(
+    'INSERT INTO auth_log (key_used, hwid, result, ip, timestamp) VALUES (?, ?, ?, ?, ?)'
+  ).run(key, hwid, result, ip, new Date().toISOString());
 }
 
 function currentMonth() {
@@ -120,128 +98,100 @@ function currentMonth() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
-function getIp(req) {
-  return (req.headers['x-forwarded-for'] || '').split(',')[0].trim()
-    || req.socket.remoteAddress
-    || 'unknown';
-}
-
-// ════════════════════════════════════════════════════════════════
-//  HEALTH CHECK  —  GET /
-// ════════════════════════════════════════════════════════════════
-app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Blizzard API' });
-});
-
 // ════════════════════════════════════════════════════════════════
 //  MOD AUTH  —  POST /mod-auth
-//
-//  Called by BlizzardAuth.java on every Minecraft launch.
-//
-//  What the jar sends:
-//    { discord_id, hwid, signature }
-//    signature = sha256(discord_id + hwid + MOD_SECRET)
-//
-//  What this endpoint does:
-//    1. Verifies the signature (proves request is from YOUR jar)
-//    2. Looks up the license by discord_id
-//    3. Checks expiry
-//    4. Binds HWID on first launch, or verifies it on subsequent ones
-//    5. Returns { valid, plan, expires_at, session_token }
+//  Called by the Minecraft mod on every launch
+//  Mod sends discord_id (baked into the jar at download time)
+//  Body: { discord_id, hwid, signature }
+//  signature = sha256(discord_id + hwid + MOD_SECRET)
 // ════════════════════════════════════════════════════════════════
 app.post('/mod-auth', (req, res) => {
-  const ip = getIp(req);
-  const { discord_id, hwid, signature } = req.body || {};
+  const { discord_id, hwid, signature } = req.body;
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
 
-  console.log(`[MOD-AUTH] discord_id=${discord_id} hwid=${hwid} ip=${ip}`);
-
-  // 1. Required fields
   if (!discord_id || !hwid || !signature) {
-    console.log('[MOD-AUTH] → MISSING_FIELDS');
     return res.json({ valid: false, reason: 'MISSING_FIELDS' });
   }
 
-  // 2. Signature: sha256(discord_id + hwid + MOD_SECRET)
-  //    Must match exactly what BlizzardAuth.java computes
-  const expected = sha256(discord_id + hwid + MOD_SECRET);
-  if (signature !== expected) {
-    console.log(`[MOD-AUTH] → BAD_SIGNATURE (got ${signature}, expected ${expected})`);
-    logAuth(discord_id, hwid, 'bad_signature', ip);
+  // 1. Verify signature
+  const expected = crypto.createHash('sha256')
+    .update(discord_id + hwid + MOD_SECRET)
+    .digest('hex');
+
+  if (expected !== signature) {
+    logAuth('none', hwid, 'bad_signature', ip);
     return res.json({ valid: false, reason: 'BAD_SIGNATURE' });
   }
 
-  // 3. Look up license by discord_id
+  // 2. Find license by discord_id
   const row = db.prepare(
-    'SELECT * FROM license_keys WHERE discord_id = ? AND used = 1'
+    'SELECT * FROM license_keys WHERE discord_id = ? AND used = 1 ORDER BY redeemed_at DESC LIMIT 1'
   ).get(discord_id);
 
   if (!row) {
-    console.log('[MOD-AUTH] → NO_LICENSE');
-    logAuth(discord_id, hwid, 'no_license', ip);
+    logAuth('none', hwid, 'no_license', ip);
     return res.json({ valid: false, reason: 'NO_LICENSE' });
   }
 
-  // 4. Expiry check
+  // 3. Check expiry
   if (isExpired(row)) {
-    console.log('[MOD-AUTH] → EXPIRED');
-    logAuth(discord_id, hwid, 'expired', ip);
+    logAuth(row.key, hwid, 'expired', ip);
     return res.json({ valid: false, reason: 'EXPIRED' });
   }
 
-  // 5. HWID binding
+  // 4. HWID check
   if (!row.hwid) {
-    // First launch — bind this HWID to the license
+    // First launch — bind HWID
     db.prepare(
-      'UPDATE license_keys SET hwid=?, hwid_locked_at=? WHERE discord_id=?'
-    ).run(hwid, new Date().toISOString(), discord_id);
-    console.log(`[MOD-AUTH] → ok_hwid_bound (${hwid})`);
-    logAuth(discord_id, hwid, 'ok_hwid_bound', ip);
+      'UPDATE license_keys SET hwid=?, hwid_locked_at=? WHERE key=?'
+    ).run(hwid, new Date().toISOString(), row.key);
+    logAuth(row.key, hwid, 'ok_hwid_bound', ip);
   } else if (row.hwid !== hwid) {
-    console.log(`[MOD-AUTH] → HWID_MISMATCH (bound=${row.hwid}, got=${hwid})`);
-    logAuth(discord_id, hwid, 'hwid_mismatch', ip);
+    // Wrong PC
+    logAuth(row.key, hwid, 'hwid_mismatch', ip);
     return res.json({ valid: false, reason: 'HWID_MISMATCH' });
   } else {
-    console.log('[MOD-AUTH] → ok');
-    logAuth(discord_id, hwid, 'ok', ip);
+    logAuth(row.key, hwid, 'ok', ip);
   }
 
-  // 6. All good — issue a daily session token
-  const sessionToken = sha256(discord_id + hwid + MOD_SECRET + new Date().toDateString());
-
+  // 5. All good
   res.json({
-    valid:         true,
-    plan:          row.plan,
-    expires_at:    row.expires_at || null,
-    session_token: sessionToken
+    valid: true,
+    plan: row.plan,
+    expires_at: row.expires_at,
+    session_token: crypto.createHash('sha256')
+      .update(discord_id + hwid + MOD_SECRET + new Date().toDateString())
+      .digest('hex')
   });
 });
 
 // ════════════════════════════════════════════════════════════════
 //  HWID RESET  —  POST /hwid-reset
-//  Max 2 resets per calendar month.
+//  Max 2 resets per calendar month
 //  Body: { discord_id, key }
 // ════════════════════════════════════════════════════════════════
 app.post('/hwid-reset', (req, res) => {
-  const { discord_id, key } = req.body || {};
+  const { discord_id, key } = req.body;
   if (!discord_id || !key)
-    return res.status(400).json({ success: false, error: 'Missing fields.' });
+    return res.status(400).json({ success: false, error: 'Missing fields' });
 
   const row = db.prepare(
     'SELECT * FROM license_keys WHERE key = ? AND discord_id = ?'
   ).get(key, discord_id);
 
-  if (!row)  return res.json({ success: false, error: 'License not found.' });
-  if (!row.used) return res.json({ success: false, error: 'Key not yet activated.' });
+  if (!row)       return res.json({ success: false, error: 'License not found.' });
+  if (!row.used)  return res.json({ success: false, error: 'Key not yet activated.' });
   if (isExpired(row)) return res.json({ success: false, error: 'Your license has expired.' });
-  if (!row.hwid) return res.json({ success: false, error: 'No HWID is bound yet.' });
+  if (!row.hwid)  return res.json({ success: false, error: 'No HWID is bound yet.' });
 
   const month = currentMonth();
-  const resetCount = (row.hwid_reset_month === month) ? (row.hwid_reset_count || 0) : 0;
+  let resetCount = row.hwid_reset_count || 0;
+  if (row.hwid_reset_month !== month) resetCount = 0;
 
   if (resetCount >= 2) {
     return res.json({
-      success:     false,
-      error:       `You have used both HWID resets for ${month}. Resets refresh on the 1st of next month.`,
+      success: false,
+      error: `You have used both HWID resets for ${month}. Resets refresh on the 1st of next month.`,
       resets_used: resetCount,
       resets_left: 0
     });
@@ -249,29 +199,29 @@ app.post('/hwid-reset', (req, res) => {
 
   db.prepare(`
     UPDATE license_keys
-    SET hwid=NULL, hwid_locked_at=NULL, hwid_reset_count=?, hwid_reset_month=?
+    SET hwid=NULL, hwid_locked_at=NULL,
+        hwid_reset_count=?, hwid_reset_month=?
     WHERE key=?
   `).run(resetCount + 1, month, key);
 
-  const left = 2 - (resetCount + 1);
   res.json({
-    success:     true,
+    success: true,
     resets_used: resetCount + 1,
-    resets_left: left,
-    message:     `HWID reset! Your next launch will bind to your new PC. You have ${left} reset${left !== 1 ? 's' : ''} left this month.`
+    resets_left: 2 - (resetCount + 1),
+    message: `HWID reset! Your next launch will bind to your new PC. You have ${2 - (resetCount + 1)} reset(s) left this month.`
   });
 });
 
 // GET /hwid-status/:discord_id
 app.get('/hwid-status/:discord_id', (req, res) => {
   const row = db.prepare(
-    'SELECT hwid, hwid_reset_count, hwid_reset_month FROM license_keys WHERE discord_id = ? AND used = 1'
+    'SELECT hwid, hwid_reset_count, hwid_reset_month FROM license_keys WHERE discord_id = ? AND used = 1 ORDER BY redeemed_at DESC LIMIT 1'
   ).get(req.params.discord_id);
 
   if (!row) return res.json({ found: false });
 
   const month      = currentMonth();
-  const resetCount = (row.hwid_reset_month === month) ? (row.hwid_reset_count || 0) : 0;
+  const resetCount = row.hwid_reset_month === month ? (row.hwid_reset_count || 0) : 0;
 
   res.json({
     found:       true,
@@ -282,70 +232,73 @@ app.get('/hwid-status/:discord_id', (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════
-//  BOT ROUTES  (X-Bot-Secret header required)
+//  BOT ROUTES
 // ════════════════════════════════════════════════════════════════
 app.post('/bot/genkey', requireBotSecret, (req, res) => {
-  const { plan, note } = req.body || {};
+  const { plan, note } = req.body;
   if (!['monthly', 'lifetime'].includes(plan))
     return res.status(400).json({ error: 'plan must be monthly or lifetime' });
   const key = generateKey(plan);
   db.prepare(
-    'INSERT INTO license_keys (key, plan, used, created_at, note) VALUES (?, ?, 0, ?, ?)'
+    'INSERT INTO license_keys (key, plan, expires_at, used, created_at, note) VALUES (?, ?, NULL, 0, ?, ?)'
   ).run(key, plan, new Date().toISOString(), note || null);
   res.json({ success: true, key, plan });
 });
 
 app.post('/bot/bulkgen', requireBotSecret, (req, res) => {
-  const { plan, note } = req.body || {};
-  let { amount } = req.body || {};
+  const { plan, note } = req.body;
+  let { amount } = req.body;
   amount = parseInt(amount, 10);
   if (!['monthly', 'lifetime'].includes(plan))
     return res.status(400).json({ error: 'plan must be monthly or lifetime' });
   if (!amount || amount < 1 || amount > 50)
     return res.status(400).json({ error: 'amount must be 1-50' });
-  const insert     = db.prepare('INSERT INTO license_keys (key, plan, used, created_at, note) VALUES (?, ?, 0, ?, ?)');
-  const now        = new Date().toISOString();
-  const keys       = Array.from({ length: amount }, () => generateKey(plan));
-  const insertMany = db.transaction(ks => { for (const k of ks) insert.run(k, plan, now, note || null); });
+  const insert = db.prepare(
+    'INSERT INTO license_keys (key, plan, expires_at, used, created_at, note) VALUES (?, ?, NULL, 0, ?, ?)'
+  );
+  const insertMany = db.transaction(keys => {
+    for (const k of keys) insert.run(k, plan, new Date().toISOString(), note || null);
+  });
+  const keys = Array.from({ length: amount }, () => generateKey(plan));
   insertMany(keys);
   res.json({ success: true, keys, plan, amount: keys.length });
+});
+
+app.get('/bot/keyinfo/:key', requireBotSecret, (req, res) => {
+  const row = db.prepare('SELECT * FROM license_keys WHERE key = ?').get(req.params.key);
+  if (!row) return res.status(404).json({ error: 'Key not found' });
+  res.json({ ...row, expired: isExpired(row) });
 });
 
 app.get('/bot/keyinfo/by-discord/:discord_id', requireBotSecret, (req, res) => {
   const row = db.prepare(
     'SELECT * FROM license_keys WHERE discord_id = ? ORDER BY redeemed_at DESC LIMIT 1'
   ).get(req.params.discord_id);
-  if (!row) return res.status(404).json({ error: 'No license found for this Discord user.' });
-  res.json({ ...row, expired: isExpired(row) });
-});
-
-app.get('/bot/keyinfo/:key', requireBotSecret, (req, res) => {
-  const row = db.prepare('SELECT * FROM license_keys WHERE key = ?').get(req.params.key);
-  if (!row) return res.status(404).json({ error: 'Key not found.' });
+  if (!row) return res.status(404).json({ error: 'No license found for this Discord user' });
   res.json({ ...row, expired: isExpired(row) });
 });
 
 app.post('/bot/revokekey', requireBotSecret, (req, res) => {
-  const { key } = req.body || {};
+  const { key } = req.body;
   if (!db.prepare('SELECT key FROM license_keys WHERE key = ?').get(key))
-    return res.status(404).json({ error: 'Key not found.' });
+    return res.status(404).json({ error: 'Key not found' });
   db.prepare('DELETE FROM license_keys WHERE key = ?').run(key);
   res.json({ success: true });
 });
 
 app.post('/bot/resethwid', requireBotSecret, (req, res) => {
-  const { key } = req.body || {};
+  const { key } = req.body;
   if (!db.prepare('SELECT key FROM license_keys WHERE key = ?').get(key))
-    return res.status(404).json({ error: 'Key not found.' });
+    return res.status(404).json({ error: 'Key not found' });
   db.prepare(
     'UPDATE license_keys SET hwid=NULL, hwid_locked_at=NULL, hwid_reset_count=0, hwid_reset_month=NULL WHERE key=?'
   ).run(key);
-  res.json({ success: true, message: 'HWID cleared. Next launch will bind to the new PC.' });
+  res.json({ success: true, message: 'HWID reset. Next launch will bind to new PC.' });
 });
 
 app.get('/bot/listkeys', requireBotSecret, (req, res) => {
   const { plan, unused } = req.query;
-  let sql      = 'SELECT * FROM license_keys WHERE 1=1';
+  let sql = 'SELECT * FROM license_keys WHERE 1=1';
   const params = [];
   if (plan)   { sql += ' AND plan = ?'; params.push(plan); }
   if (unused) { sql += ' AND used = 0'; }
@@ -354,33 +307,37 @@ app.get('/bot/listkeys', requireBotSecret, (req, res) => {
 });
 
 app.get('/bot/authlog', requireBotSecret, (req, res) => {
-  res.json(db.prepare('SELECT * FROM auth_log ORDER BY timestamp DESC LIMIT 100').all());
+  res.json(db.prepare('SELECT * FROM auth_log ORDER BY timestamp DESC LIMIT 50').all());
 });
 
 // ════════════════════════════════════════════════════════════════
 //  WEBSITE ROUTES
 // ════════════════════════════════════════════════════════════════
 app.post('/redeem', (req, res) => {
-  const { discord_id, key } = req.body || {};
+  const { discord_id, key } = req.body;
   if (!discord_id || !key)
-    return res.status(400).json({ success: false, error: 'Missing fields.' });
+    return res.status(400).json({ success: false, error: 'Missing fields' });
 
   const row = db.prepare('SELECT * FROM license_keys WHERE key = ?').get(key);
-  if (!row)
-    return res.json({ success: false, error: 'Invalid or unknown key.' });
+  if (!row) return res.json({ success: false, error: 'Invalid or unknown key.' });
 
   if (row.used) {
     if (row.discord_id === discord_id)
       return res.json({
         success: true,
-        license: { key: row.key, plan: row.plan, expires_at: row.expires_at, redeemed_at: row.redeemed_at, expired: isExpired(row) }
+        license: {
+          key: row.key,
+          plan: row.plan,
+          expires_at: row.expires_at,
+          redeemed_at: row.redeemed_at,
+          expired: isExpired(row)
+        }
       });
     return res.json({ success: false, error: 'Key already used by another account.' });
   }
 
   const now        = new Date().toISOString();
-  const expires_at = row.plan === 'monthly' ? addMonths(now, 1) : null;
-
+  const expires_at = row.plan === 'monthly' ? addMonths(new Date(), 1) : null;
   db.prepare(
     'UPDATE license_keys SET used=1, discord_id=?, redeemed_at=?, expires_at=? WHERE key=?'
   ).run(discord_id, now, expires_at, key);
@@ -398,45 +355,59 @@ app.get('/license/:discord_id', (req, res) => {
   if (!row) return res.json({ has_license: false });
   res.json({
     has_license: true,
-    license: { key: row.key, plan: row.plan, expires_at: row.expires_at, redeemed_at: row.redeemed_at, expired: isExpired(row) }
+    license: {
+      key: row.key,
+      plan: row.plan,
+      expires_at: row.expires_at,
+      redeemed_at: row.redeemed_at,
+      expired: isExpired(row)
+    }
   });
 });
 
+// ════════════════════════════════════════════════════════════════
+//  DOWNLOAD  —  GET /download/:filename
+//  Injects discord_id into the jar as blizzard_user.txt
+//  so the mod knows who the user is at launch
+// ════════════════════════════════════════════════════════════════
 app.get('/download/:filename', (req, res) => {
   const { discord_id, key } = req.query;
-  if (!discord_id || !key)
-    return res.status(403).json({ error: 'Missing credentials.' });
+  if (!discord_id || !key) return res.status(403).send('Missing credentials');
 
   const row = db.prepare(
     'SELECT * FROM license_keys WHERE key = ? AND discord_id = ?'
   ).get(key, discord_id);
 
   if (!row || !row.used || isExpired(row))
-    return res.status(403).json({ error: 'No valid license.' });
+    return res.status(403).send('No valid license.');
 
-  const filePath = path.join(DOWNLOAD_DIR, path.basename(req.params.filename));
-  if (!fs.existsSync(filePath))
-    return res.status(404).json({ error: 'File not found.' });
+  const basePath = path.join(DOWNLOAD_DIR, req.params.filename);
+  if (!fs.existsSync(basePath)) return res.status(404).send('File not found');
 
-  db.prepare(
-    'INSERT INTO downloads (discord_id, key_used, downloaded_at) VALUES (?, ?, ?)'
-  ).run(discord_id, key, new Date().toISOString());
+  try {
+    // Open the base jar and inject discord_id as blizzard_user.txt
+    const zip = new AdmZip(basePath);
+    zip.addFile('blizzard_user.txt', Buffer.from(discord_id, 'utf8'));
+    const outputBuffer = zip.toBuffer();
 
-  res.download(filePath);
+    // Log the download
+    db.prepare(
+      'INSERT INTO downloads (discord_id, key_used, downloaded_at) VALUES (?, ?, ?)'
+    ).run(discord_id, key, new Date().toISOString());
+
+    res.setHeader('Content-Disposition', `attachment; filename="BlizzardClient.jar"`);
+    res.setHeader('Content-Type', 'application/java-archive');
+    res.send(outputBuffer);
+
+  } catch (err) {
+    console.error('Jar injection failed:', err);
+    res.status(500).send('Failed to generate mod file.');
+  }
 });
 
-// ── STARTUP ────────────────────────────────────────────────────
-if (!fs.existsSync(DOWNLOAD_DIR)) fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
+if (!fs.existsSync(DOWNLOAD_DIR)) fs.mkdirSync(DOWNLOAD_DIR);
 
 app.listen(PORT, () => {
   console.log(`✅ Blizzard API running on port ${PORT}`);
-  console.log(`   DB:         ${DB_PATH}`);
   console.log(`   MOD_SECRET: ${MOD_SECRET}`);
-  console.log('');
-  console.log('Routes:');
-  console.log('  POST /mod-auth     ← Minecraft mod calls this');
-  console.log('  POST /redeem       ← Website key redemption');
-  console.log('  POST /hwid-reset   ← User HWID reset (2/month)');
-  console.log('  GET  /license/:id  ← Check license by Discord ID');
-  console.log('  POST /bot/*        ← Discord bot routes');
 });

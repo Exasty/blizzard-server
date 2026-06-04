@@ -9,12 +9,15 @@ const Database = require('better-sqlite3');
 const path     = require('path');
 const fs       = require('fs');
 const crypto   = require('crypto');
+const https    = require('https');
 
 const app = express();
 const db  = new Database('blizzard.db');
 
 const PORT       = process.env.PORT || 8000;
-const BOT_SECRET = process.env.BOT_SECRET || 'change-this-secret-123';
+const BOT_SECRET       = process.env.BOT_SECRET || 'change-this-secret-123';
+const BOT_TOKEN        = process.env.BOT_TOKEN  || '';
+const ALERT_CHANNEL_ID = process.env.ALERT_CHANNEL_ID || '1512039587835547678';
 const MOD_SECRET = process.env.MOD_SECRET || 'mod-secret-change-this-456';
 const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
 
@@ -113,6 +116,26 @@ function currentMonth() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
+// Send an embed alert to Discord via bot token
+function sendDiscordAlert(embed) {
+  if (!BOT_TOKEN || !ALERT_CHANNEL_ID) return;
+  const body = JSON.stringify({ embeds: [embed] });
+  const options = {
+    hostname: 'discord.com',
+    path: `/api/v10/channels/${ALERT_CHANNEL_ID}/messages`,
+    method: 'POST',
+    headers: {
+      'Content-Type':   'application/json',
+      'Authorization':  `Bot ${BOT_TOKEN}`,
+      'Content-Length': Buffer.byteLength(body),
+    }
+  };
+  const req = https.request(options, () => {});
+  req.on('error', err => console.error('[Discord alert error]', err.message));
+  req.write(body);
+  req.end();
+}
+
 // ════════════════════════════════════════════════════════════════
 //  MOD AUTH  —  POST /auth
 //  Called by the Minecraft mod on every single launch
@@ -153,8 +176,25 @@ app.post('/auth', (req, res) => {
     ).run(hwid, new Date().toISOString(), key);
     logAuth(key, hwid, 'ok_hwid_bound', ip);
   } else if (row.hwid !== hwid) {
-    // Wrong PC
+    // Wrong PC — log and alert
     logAuth(key, hwid, 'hwid_mismatch', ip);
+
+    sendDiscordAlert({
+      title: '⚠️ HWID Mismatch Detected',
+      color: 0xED4245,
+      fields: [
+        { name: '🔑 License Key',   value: `\`${key}\``,                                           inline: false },
+        { name: '💳 Plan',          value: row.plan === 'lifetime' ? '🌟 Lifetime' : '📅 Monthly', inline: true },
+        { name: '👤 License Owner', value: row.discord_id ? `<@${row.discord_id}>` : '`Unknown`',  inline: true },
+        { name: '✅ Bound HWID',    value: `\`${row.hwid}\``,                                      inline: false },
+        { name: '❌ Attempted HWID',value: `\`${hwid}\``,                                          inline: false },
+        { name: '🌐 IP',            value: `\`${ip}\``,                                            inline: true },
+        { name: '🕐 Time',          value: `<t:${Math.floor(Date.now()/1000)}:F>`,                 inline: true },
+      ],
+      footer: { text: 'Blizzard Client · Auth System' },
+      timestamp: new Date().toISOString(),
+    });
+
     return res.json({ valid: false, reason: 'HWID_MISMATCH' });
   }
 

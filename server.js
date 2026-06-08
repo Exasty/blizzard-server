@@ -391,7 +391,7 @@ app.get('/license/:discord_id', async (req, res) => {
 // ════════════════════════════════════════════════════════════════
 //  DOWNLOAD  —  GET /download/:filename
 // ════════════════════════════════════════════════════════════════
-app.get('/download/:filename', async (req, res) => {
+app.get('/download', async (req, res) => {
   const { discord_id, key } = req.query;
   if (!discord_id || !key) return res.status(403).send('Missing credentials');
 
@@ -403,7 +403,7 @@ app.get('/download/:filename', async (req, res) => {
   if (!row || !row.used || isExpired(row))
     return res.status(403).send('No valid license.');
 
-  const basePath = path.join(DOWNLOAD_DIR, req.params.filename);
+  const basePath = path.join(DOWNLOAD_DIR, 'blizzard-obfuscated.jar');
   if (!fs.existsSync(basePath)) return res.status(404).send('File not found');
 
   try {
@@ -416,7 +416,7 @@ app.get('/download/:filename', async (req, res) => {
       [discord_id, key, new Date().toISOString()]
     );
 
-    res.setHeader('Content-Disposition', `attachment; filename="blizzard-obfuscated.jar"`);
+    res.setHeader('Content-Disposition', `attachment; filename="BlizzardClient.jar"`);
     res.setHeader('Content-Type', 'application/java-archive');
     res.send(outputBuffer);
 

@@ -416,7 +416,7 @@ app.get('/download/:filename', async (req, res) => {
       [discord_id, key, new Date().toISOString()]
     );
 
-    res.setHeader('Content-Disposition', `attachment; filename="BlizzardClient.jar"`);
+    res.setHeader('Content-Disposition', `attachment; filename="blizzard-obfuscated.jar"`);
     res.setHeader('Content-Type', 'application/java-archive');
     res.send(outputBuffer);
 

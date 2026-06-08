@@ -14,7 +14,9 @@ const AdmZip   = require('adm-zip');
 const app  = express();
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: process.env.DATABASE_URL && process.env.DATABASE_URL.includes('railway.internal')
+    ? false
+    : { rejectUnauthorized: false }
 });
 
 // Thin helpers so the rest of the code stays identical in style

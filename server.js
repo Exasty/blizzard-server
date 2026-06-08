@@ -391,7 +391,7 @@ app.get('/license/:discord_id', async (req, res) => {
 // ════════════════════════════════════════════════════════════════
 //  DOWNLOAD  —  GET /download/:filename
 // ════════════════════════════════════════════════════════════════
-app.get('/download', async (req, res) => {
+app.get('/download/:filename', async (req, res) => {
   const { discord_id, key } = req.query;
   if (!discord_id || !key) return res.status(403).send('Missing credentials');
 

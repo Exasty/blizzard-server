@@ -11,7 +11,7 @@
   "dependencies": {
     "adm-zip":      "^0.5.10",
     "axios":        "^1.6.0",
-    "better-sqlite3": "^9.4.0",
+    "pg":           "^8.11.0",
     "concurrently": "^8.2.0",
     "cors":         "^2.8.5",
     "discord.js":   "^14.14.1",

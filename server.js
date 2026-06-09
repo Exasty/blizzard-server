@@ -19,10 +19,6 @@ const pool = new Pool({
     : { rejectUnauthorized: false }
 });
 
-// Thin helpers so the rest of the code stays identical in style
-// get()  → returns first row or null   (replaces .prepare().get())
-// all()  → returns all rows            (replaces .prepare().all())
-// run()  → executes, no return value   (replaces .prepare().run())
 const db = {
   get:  async (sql, params = []) => { const r = await pool.query(sql, params); return r.rows[0] ?? null; },
   all:  async (sql, params = []) => { const r = await pool.query(sql, params); return r.rows; },
@@ -32,7 +28,38 @@ const db = {
 const PORT       = process.env.PORT || 8000;
 const BOT_SECRET = process.env.BOT_SECRET || 'change-this-secret-123';
 const MOD_SECRET = process.env.MOD_SECRET || 'mgvSs0NvrAqFubgMpdEaXS1TFNz2W3GDJcJGA6Tu8qz3Am3V7GaS8gfnDWqZrDK7';
-const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
+
+// ── Robust download directory resolution ──────────────────────
+// Try multiple candidate paths so it works regardless of CWD or __dirname
+const DOWNLOAD_CANDIDATES = [
+  path.join(__dirname, 'downloads'),
+  path.join(process.cwd(), 'downloads'),
+  '/app/downloads',
+];
+
+function findJar() {
+  for (const dir of DOWNLOAD_CANDIDATES) {
+    const jarPath = path.join(dir, 'blizzard-obfuscated.jar');
+    if (fs.existsSync(jarPath)) {
+      console.log(`✅ Found jar at: ${jarPath}`);
+      return jarPath;
+    }
+    console.log(`   Not found: ${jarPath}`);
+  }
+  return null;
+}
+
+// Log paths at startup so you can see exactly what's happening in Railway logs
+console.log('=== PATH DIAGNOSTICS ===');
+console.log('__dirname  :', __dirname);
+console.log('process.cwd:', process.cwd());
+DOWNLOAD_CANDIDATES.forEach(d => {
+  console.log(`  ${d} → exists: ${fs.existsSync(d)}`);
+  if (fs.existsSync(d)) {
+    try { console.log('    contents:', fs.readdirSync(d)); } catch(e) {}
+  }
+});
+console.log('========================');
 
 app.use(cors({
   origin: [
@@ -127,7 +154,6 @@ app.post('/mod-auth', async (req, res) => {
     return res.json({ valid: false, reason: 'MISSING_FIELDS' });
   }
 
-  // 1. Verify signature
   const expected = crypto.createHash('sha256')
     .update(discord_id + hwid + MOD_SECRET)
     .digest('hex');
@@ -137,7 +163,6 @@ app.post('/mod-auth', async (req, res) => {
     return res.json({ valid: false, reason: 'BAD_SIGNATURE' });
   }
 
-  // 2. Find license by discord_id
   const row = await db.get(
     'SELECT * FROM license_keys WHERE discord_id = $1 AND used = 1 ORDER BY redeemed_at DESC LIMIT 1',
     [discord_id]
@@ -148,15 +173,12 @@ app.post('/mod-auth', async (req, res) => {
     return res.json({ valid: false, reason: 'NO_LICENSE' });
   }
 
-  // 3. Check expiry
   if (isExpired(row)) {
     await logAuth(row.key, hwid, 'expired', ip);
     return res.json({ valid: false, reason: 'EXPIRED' });
   }
 
-  // 4. HWID check
   if (!row.hwid) {
-    // First launch — bind HWID
     await db.run(
       'UPDATE license_keys SET hwid=$1, hwid_locked_at=$2 WHERE key=$3',
       [hwid, new Date().toISOString(), row.key]
@@ -169,7 +191,6 @@ app.post('/mod-auth', async (req, res) => {
     await logAuth(row.key, hwid, 'ok', ip);
   }
 
-  // 5. All good
   res.json({
     valid: true,
     plan: row.plan,
@@ -193,10 +214,10 @@ app.post('/hwid-reset', async (req, res) => {
     [key, discord_id]
   );
 
-  if (!row)         return res.json({ success: false, error: 'License not found.' });
-  if (!row.used)    return res.json({ success: false, error: 'Key not yet activated.' });
+  if (!row)           return res.json({ success: false, error: 'License not found.' });
+  if (!row.used)      return res.json({ success: false, error: 'Key not yet activated.' });
   if (isExpired(row)) return res.json({ success: false, error: 'Your license has expired.' });
-  if (!row.hwid)    return res.json({ success: false, error: 'No HWID is bound yet.' });
+  if (!row.hwid)      return res.json({ success: false, error: 'No HWID is bound yet.' });
 
   const month = currentMonth();
   let resetCount = row.hwid_reset_count || 0;
@@ -224,7 +245,6 @@ app.post('/hwid-reset', async (req, res) => {
   });
 });
 
-// GET /hwid-status/:discord_id
 app.get('/hwid-status/:discord_id', async (req, res) => {
   const row = await db.get(
     'SELECT hwid, hwid_reset_count, hwid_reset_month FROM license_keys WHERE discord_id = $1 AND used = 1 ORDER BY redeemed_at DESC LIMIT 1',
@@ -271,7 +291,6 @@ app.post('/bot/bulkgen', requireBotSecret, async (req, res) => {
   const keys = Array.from({ length: amount }, () => generateKey(plan));
   const now  = new Date().toISOString();
 
-  // Bulk insert in one query
   const values = keys.map((k, i) => `($${i * 4 + 1}, $${i * 4 + 2}, 0, $${i * 4 + 3}, $${i * 4 + 4})`).join(', ');
   const params = keys.flatMap(k => [k, plan, now, note || null]);
   await db.run(
@@ -403,11 +422,15 @@ app.get('/download/:filename', async (req, res) => {
   if (!row || !row.used || isExpired(row))
     return res.status(403).send('No valid license.');
 
-  const basePath = path.join(DOWNLOAD_DIR, 'blizzard-obfuscated.jar');
-  if (!fs.existsSync(basePath)) return res.status(404).send('File not found');
+  // Find the jar across candidate paths
+  const jarPath = findJar();
+  if (!jarPath) {
+    console.error('Jar not found. Searched:', DOWNLOAD_CANDIDATES.map(d => path.join(d, 'blizzard-obfuscated.jar')));
+    return res.status(404).send('File not found. Please contact support.');
+  }
 
   try {
-    const zip = new AdmZip(basePath);
+    const zip = new AdmZip(jarPath);
     zip.addFile('blizzard_user.txt', Buffer.from(discord_id, 'utf8'));
     const outputBuffer = zip.toBuffer();
 
@@ -426,13 +449,10 @@ app.get('/download/:filename', async (req, res) => {
   }
 });
 
-if (!fs.existsSync(DOWNLOAD_DIR)) fs.mkdirSync(DOWNLOAD_DIR);
-
 // ── START ─────────────────────────────────────────────────────
 initDB().then(() => {
   app.listen(PORT, () => {
     console.log(`✅ Blizzard API running on port ${PORT}`);
-    console.log(`   MOD_SECRET: ${MOD_SECRET}`);
   });
 }).catch(err => {
   console.error('❌ Failed to init DB:', err);

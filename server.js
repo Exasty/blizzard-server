@@ -29,37 +29,23 @@ const PORT       = process.env.PORT || 8000;
 const BOT_SECRET = process.env.BOT_SECRET || 'change-this-secret-123';
 const MOD_SECRET = process.env.MOD_SECRET || 'mgvSs0NvrAqFubgMpdEaXS1TFNz2W3GDJcJGA6Tu8qz3Am3V7GaS8gfnDWqZrDK7';
 
-// ── Robust download directory resolution ──────────────────────
-// Try multiple candidate paths so it works regardless of CWD or __dirname
-const DOWNLOAD_CANDIDATES = [
-  path.join(__dirname, 'downloads'),
-  path.join(process.cwd(), 'downloads'),
-  '/app/downloads',
-];
+// ── Jar path ──────────────────────────────────────────────────
+const JAR_PATH = path.join(__dirname, 'downloads', 'blizzard-obfuscated.jar');
 
-function findJar() {
-  for (const dir of DOWNLOAD_CANDIDATES) {
-    const jarPath = path.join(dir, 'blizzard-obfuscated.jar');
-    if (fs.existsSync(jarPath)) {
-      console.log(`✅ Found jar at: ${jarPath}`);
-      return jarPath;
-    }
-    console.log(`   Not found: ${jarPath}`);
-  }
-  return null;
-}
-
-// Log paths at startup so you can see exactly what's happening in Railway logs
 console.log('=== PATH DIAGNOSTICS ===');
 console.log('__dirname  :', __dirname);
-console.log('process.cwd:', process.cwd());
-DOWNLOAD_CANDIDATES.forEach(d => {
-  console.log(`  ${d} → exists: ${fs.existsSync(d)}`);
-  if (fs.existsSync(d)) {
-    try { console.log('    contents:', fs.readdirSync(d)); } catch(e) {}
-  }
-});
+console.log('JAR_PATH   :', JAR_PATH);
+console.log('JAR exists :', fs.existsSync(JAR_PATH));
 console.log('========================');
+
+function findJar() {
+  if (fs.existsSync(JAR_PATH)) {
+    console.log(`✅ Found jar at: ${JAR_PATH}`);
+    return JAR_PATH;
+  }
+  console.error(`❌ Jar not found at: ${JAR_PATH}`);
+  return null;
+}
 
 app.use(cors({
   origin: [
@@ -422,10 +408,8 @@ app.get('/download/:filename', async (req, res) => {
   if (!row || !row.used || isExpired(row))
     return res.status(403).send('No valid license.');
 
-  // Find the jar across candidate paths
   const jarPath = findJar();
   if (!jarPath) {
-    console.error('Jar not found. Searched:', DOWNLOAD_CANDIDATES.map(d => path.join(d, 'blizzard-obfuscated.jar')));
     return res.status(404).send('File not found. Please contact support.');
   }
 

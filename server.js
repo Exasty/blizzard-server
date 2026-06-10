@@ -56,6 +56,10 @@ app.use(cors({
 }));
 app.use(express.json());
 
+// ── HEALTH CHECK ──────────────────────────────────────────────
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
+app.get('/', (req, res) => res.json({ status: 'ok' }));
+
 // ── DATABASE ──────────────────────────────────────────────────
 async function initDB() {
   await pool.query(`
@@ -434,11 +438,23 @@ app.get('/download/:filename', async (req, res) => {
 });
 
 // ── START ─────────────────────────────────────────────────────
-initDB().then(() => {
-  app.listen(PORT, () => {
-    console.log(`✅ Blizzard API running on port ${PORT}`);
-  });
-}).catch(err => {
-  console.error('❌ Failed to init DB:', err);
-  process.exit(1);
+// Bind the port immediately so the platform health check passes,
+// then initialise the database in the background.
+app.listen(PORT, () => {
+  console.log(`✅ Blizzard API running on port ${PORT}`);
 });
+
+// Verify DB connectivity and run migrations after the server is up.
+pool.connect()
+  .then(client => {
+    client.release();
+    console.log('✅ DB connected');
+    return initDB();
+  })
+  .then(() => {
+    console.log('✅ DB initialised');
+  })
+  .catch(err => {
+    console.error('❌ DB init failed:', err.message);
+    process.exit(1);
+  });

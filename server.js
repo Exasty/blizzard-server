@@ -29,6 +29,31 @@ const PORT       = process.env.PORT || 8000;
 const BOT_SECRET = process.env.BOT_SECRET || 'change-this-secret-123';
 const MOD_SECRET = process.env.MOD_SECRET || 'mgvSs0NvrAqFubgMpdEaXS1TFNz2W3GDJcJGA6Tu8qz3Am3V7GaS8gfnDWqZrDK7';
 
+// ── Response signing (Ed25519) ───────────────────────────────
+// Generate once with generate-keys.js. Set MOD_SIGNING_KEY in Railway's
+// environment variables (base64 PKCS8 private key). Never hardcode it here.
+const MOD_SIGNING_KEY_B64 = process.env.MOD_SIGNING_KEY;
+const signingKey = MOD_SIGNING_KEY_B64
+  ? crypto.createPrivateKey({
+      key: Buffer.from(MOD_SIGNING_KEY_B64, 'base64'),
+      format: 'der',
+      type: 'pkcs8'
+    })
+  : null;
+
+if (!signingKey) {
+  console.warn('⚠️  MOD_SIGNING_KEY not set — /mod-auth responses will fail to sign.');
+}
+
+function signedResponse(payloadObj) {
+  const payload = JSON.stringify(payloadObj);
+  if (!signingKey) {
+    throw new Error('MOD_SIGNING_KEY not configured');
+  }
+  const sig = crypto.sign(null, Buffer.from(payload, 'utf8'), signingKey).toString('base64');
+  return { payload, sig };
+}
+
 // ── Jar path ──────────────────────────────────────────────────
 const JAR_PATH = path.join(__dirname, 'downloads', 'blizzard-obfuscated.jar');
 
@@ -135,22 +160,31 @@ function currentMonth() {
 
 // ════════════════════════════════════════════════════════════════
 //  MOD AUTH  —  POST /mod-auth
+//  Now requires `ts` (millis) in the request and returns a SIGNED
+//  { payload, sig } envelope instead of raw JSON. Logic (HWID
+//  binding, expiry, lookup) is unchanged from the original.
 // ════════════════════════════════════════════════════════════════
 app.post('/mod-auth', async (req, res) => {
-  const { discord_id, hwid, signature } = req.body;
+  const { discord_id, hwid, signature, ts } = req.body;
   const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
 
-  if (!discord_id || !hwid || !signature) {
-    return res.json({ valid: false, reason: 'MISSING_FIELDS' });
+  if (!discord_id || !hwid || !signature || !ts) {
+    return res.json(signedResponse({ valid: false, reason: 'MISSING_FIELDS', ts: Date.now().toString() }));
+  }
+
+  // Reject stale/replayed requests (60s window matches the Java client)
+  const age = Date.now() - parseInt(ts, 10);
+  if (isNaN(age) || Math.abs(age) > 60_000) {
+    return res.json(signedResponse({ valid: false, reason: 'STALE_REQUEST', ts: Date.now().toString() }));
   }
 
   const expected = crypto.createHash('sha256')
-    .update(discord_id + hwid + MOD_SECRET)
+    .update(discord_id + hwid + ts + MOD_SECRET)
     .digest('hex');
 
   if (expected !== signature) {
     await logAuth('none', hwid, 'bad_signature', ip);
-    return res.json({ valid: false, reason: 'BAD_SIGNATURE' });
+    return res.json(signedResponse({ valid: false, reason: 'BAD_SIGNATURE', ts: Date.now().toString() }));
   }
 
   const row = await db.get(
@@ -160,12 +194,12 @@ app.post('/mod-auth', async (req, res) => {
 
   if (!row) {
     await logAuth('none', hwid, 'no_license', ip);
-    return res.json({ valid: false, reason: 'NO_LICENSE' });
+    return res.json(signedResponse({ valid: false, reason: 'NO_LICENSE', ts: Date.now().toString() }));
   }
 
   if (isExpired(row)) {
     await logAuth(row.key, hwid, 'expired', ip);
-    return res.json({ valid: false, reason: 'EXPIRED' });
+    return res.json(signedResponse({ valid: false, reason: 'EXPIRED', ts: Date.now().toString() }));
   }
 
   if (!row.hwid) {
@@ -176,19 +210,20 @@ app.post('/mod-auth', async (req, res) => {
     await logAuth(row.key, hwid, 'ok_hwid_bound', ip);
   } else if (row.hwid !== hwid) {
     await logAuth(row.key, hwid, 'hwid_mismatch', ip);
-    return res.json({ valid: false, reason: 'HWID_MISMATCH' });
+    return res.json(signedResponse({ valid: false, reason: 'HWID_MISMATCH', ts: Date.now().toString() }));
   } else {
     await logAuth(row.key, hwid, 'ok', ip);
   }
 
-  res.json({
+  return res.json(signedResponse({
     valid: true,
     plan: row.plan,
-    expires_at: row.expires_at,
+    reason: '',
     session_token: crypto.createHash('sha256')
       .update(discord_id + hwid + MOD_SECRET + new Date().toDateString())
-      .digest('hex')
-  });
+      .digest('hex'),
+    ts: Date.now().toString()
+  }));
 });
 
 // ════════════════════════════════════════════════════════════════

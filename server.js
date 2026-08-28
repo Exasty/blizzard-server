@@ -1,6 +1,18 @@
 // ═══════════════════════════════════════════════════════════════
 //  BLIZZARD BACKEND — server.js
-//  Northflank-ready
+//
+//  Required packages:
+//    npm install express cors pg uuid adm-zip
+//
+//  Environment variables:
+//    DATABASE_URL=your_supabase_postgresql_connection_string
+//    BOT_SECRET=your_bot_secret
+//    MOD_SECRET=your_mod_secret
+//    MOD_SIGNING_KEY=your_base64_pkcs8_private_key
+//    PORT=8000
+//
+//  Website:
+//    https://blizzardweb.exasty.workers.dev/
 // ═══════════════════════════════════════════════════════════════
 
 const express = require('express');
@@ -13,23 +25,47 @@ const AdmZip = require('adm-zip');
 
 const app = express();
 
+// ── CONFIG ────────────────────────────────────────────────────
+
+const PORT = Number(process.env.PORT) || 8000;
+
+const BOT_SECRET =
+  process.env.BOT_SECRET || 'change-this-secret-123';
+
+const MOD_SECRET =
+  process.env.MOD_SECRET || 'change-this-mod-secret';
+
+const DATABASE_URL = process.env.DATABASE_URL;
+
 // ── DATABASE ──────────────────────────────────────────────────
+
+if (!DATABASE_URL) {
+  console.error('❌ DATABASE_URL is not set.');
+  process.exit(1);
+}
+
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL?.includes('localhost')
-    ? false
-    : { rejectUnauthorized: false }
+  connectionString: DATABASE_URL,
+
+  // Supabase PostgreSQL connection
+  ssl: {
+    rejectUnauthorized: false
+  },
+
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000
 });
 
 const db = {
   get: async (sql, params = []) => {
-    const r = await pool.query(sql, params);
-    return r.rows[0] ?? null;
+    const result = await pool.query(sql, params);
+    return result.rows[0] ?? null;
   },
 
   all: async (sql, params = []) => {
-    const r = await pool.query(sql, params);
-    return r.rows;
+    const result = await pool.query(sql, params);
+    return result.rows;
   },
 
   run: async (sql, params = []) => {
@@ -37,18 +73,15 @@ const db = {
   }
 };
 
-// ── CONFIG ────────────────────────────────────────────────────
-const PORT = process.env.PORT || 8000;
+// ── RESPONSE SIGNING ──────────────────────────────────────────
+//
+// Generate this once with generate-keys.js.
+// Put the base64 PKCS8 private key into:
+// MOD_SIGNING_KEY
+//
+// NEVER hardcode the private key here.
+//
 
-const BOT_SECRET = process.env.BOT_SECRET;
-const MOD_SECRET = process.env.MOD_SECRET;
-
-if (!BOT_SECRET || !MOD_SECRET) {
-  console.error('❌ BOT_SECRET and MOD_SECRET must be configured.');
-  process.exit(1);
-}
-
-// ── MOD SIGNING KEY ───────────────────────────────────────────
 const MOD_SIGNING_KEY_B64 = process.env.MOD_SIGNING_KEY;
 
 const signingKey = MOD_SIGNING_KEY_B64
@@ -60,7 +93,9 @@ const signingKey = MOD_SIGNING_KEY_B64
   : null;
 
 if (!signingKey) {
-  console.warn('⚠️ MOD_SIGNING_KEY not set — /mod-auth responses will fail to sign.');
+  console.warn(
+    '⚠️ MOD_SIGNING_KEY is not set — /mod-auth responses will fail to sign.'
+  );
 }
 
 function signedResponse(payloadObj) {
@@ -71,16 +106,26 @@ function signedResponse(payloadObj) {
   }
 
   const sig = crypto
-    .sign(null, Buffer.from(payload, 'utf8'), signingKey)
+    .sign(
+      null,
+      Buffer.from(payload, 'utf8'),
+      signingKey
+    )
     .toString('base64');
 
-  return { payload, sig };
+  return {
+    payload,
+    sig
+  };
 }
 
 // ── JAR PATH ──────────────────────────────────────────────────
-const JAR_PATH =
-  process.env.JAR_PATH ||
-  path.join(__dirname, 'downloads', 'blizzard-obfuscated.jar');
+
+const JAR_PATH = path.join(
+  __dirname,
+  'downloads',
+  'blizzard-obfuscated.jar'
+);
 
 console.log('=== PATH DIAGNOSTICS ===');
 console.log('__dirname  :', __dirname);
@@ -98,31 +143,59 @@ function findJar() {
   return null;
 }
 
-// ── CORS ──────────────────────────────────────────────────────
-app.use(cors({
-  origin: [
-    'https://blizzardclient.netlify.app',
-    'http://localhost:3000',
-    'http://127.0.0.1:5500'
-  ]
-}));
+// ── EXPRESS CONFIG ────────────────────────────────────────────
 
-app.use(express.json());
+app.set('trust proxy', true);
+
+app.use(
+  cors({
+    origin: [
+      'https://blizzardweb.exasty.workers.dev',
+      'https://blizzardclient.netlify.app',
+      'http://localhost:3000',
+      'http://127.0.0.1:5500'
+    ],
+
+    methods: [
+      'GET',
+      'POST',
+      'PUT',
+      'PATCH',
+      'DELETE',
+      'OPTIONS'
+    ],
+
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Bot-Secret'
+    ]
+  })
+);
+
+app.use(express.json({ limit: '1mb' }));
 
 // ═══════════════════════════════════════════════════════════════
 //  HEALTH CHECK
 // ═══════════════════════════════════════════════════════════════
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+  res.json({
+    status: 'ok',
+    service: 'blizzard-backend'
+  });
 });
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok' });
+  res.json({
+    status: 'ok',
+    service: 'Blizzard API',
+    website: 'https://blizzardweb.exasty.workers.dev'
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════
-//  DATABASE
+//  DATABASE INITIALIZATION
 // ═══════════════════════════════════════════════════════════════
 
 async function initDB() {
@@ -157,7 +230,21 @@ async function initDB() {
       ip        TEXT,
       timestamp TIMESTAMPTZ NOT NULL
     );
+
+    CREATE INDEX IF NOT EXISTS idx_license_discord
+      ON license_keys(discord_id);
+
+    CREATE INDEX IF NOT EXISTS idx_license_redeemed
+      ON license_keys(redeemed_at);
+
+    CREATE INDEX IF NOT EXISTS idx_auth_log_timestamp
+      ON auth_log(timestamp);
+
+    CREATE INDEX IF NOT EXISTS idx_downloads_discord
+      ON downloads(discord_id);
   `);
+
+  console.log('✅ DB tables/indexes ready');
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -166,9 +253,12 @@ async function initDB() {
 
 function generateKey(plan) {
   const seg = () =>
-    Math.random().toString(16).slice(2, 6).toUpperCase();
+    crypto.randomBytes(2).toString('hex').toUpperCase();
 
-  const prefix = plan === 'lifetime' ? 'BLZLT' : 'BLZMN';
+  const prefix =
+    plan === 'lifetime'
+      ? 'BLZLT'
+      : 'BLZMN';
 
   return `${prefix}-${seg()}-${seg()}-${seg()}-${seg()}`;
 }
@@ -180,39 +270,58 @@ function addMonths(date, n) {
 }
 
 function isExpired(row) {
-  if (row.plan === 'lifetime') return false;
-  if (!row.expires_at) return false;
+  if (row.plan === 'lifetime') {
+    return false;
+  }
+
+  if (!row.expires_at) {
+    return false;
+  }
 
   return new Date(row.expires_at) < new Date();
 }
 
 function requireBotSecret(req, res, next) {
   if (req.headers['x-bot-secret'] !== BOT_SECRET) {
-    return res.status(401).json({ error: 'Unauthorized' });
+    return res.status(401).json({
+      error: 'Unauthorized'
+    });
   }
 
   next();
 }
 
 async function logAuth(key, hwid, result, ip) {
-  await db.run(
-    `INSERT INTO auth_log
-      (key_used, hwid, result, ip, timestamp)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [
-      key,
-      hwid,
-      result,
-      ip,
-      new Date().toISOString()
-    ]
-  );
+  try {
+    await db.run(
+      `
+      INSERT INTO auth_log
+        (key_used, hwid, result, ip, timestamp)
+      VALUES
+        ($1, $2, $3, $4, $5)
+      `,
+      [
+        key,
+        hwid,
+        result,
+        ip,
+        new Date().toISOString()
+      ]
+    );
+  } catch (err) {
+    console.error(
+      '❌ Failed to write auth log:',
+      err.message
+    );
+  }
 }
 
 function currentMonth() {
   const d = new Date();
 
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  return `${d.getFullYear()}-${String(
+    d.getMonth() + 1
+  ).padStart(2, '0')}`;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -222,14 +331,24 @@ function currentMonth() {
 
 app.post('/mod-auth', async (req, res) => {
   try {
-    const { discord_id, hwid, signature, ts } = req.body;
+    const {
+      discord_id,
+      hwid,
+      signature,
+      ts
+    } = req.body;
 
     const ip =
-      req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+      req.headers['x-forwarded-for'] ||
       req.socket.remoteAddress ||
-      '';
+      'unknown';
 
-    if (!discord_id || !hwid || !signature || !ts) {
+    if (
+      !discord_id ||
+      !hwid ||
+      !signature ||
+      !ts
+    ) {
       return res.json(
         signedResponse({
           valid: false,
@@ -239,9 +358,21 @@ app.post('/mod-auth', async (req, res) => {
       );
     }
 
-    const age = Date.now() - parseInt(ts, 10);
+    const timestamp = parseInt(ts, 10);
 
-    if (isNaN(age) || Math.abs(age) > 60_000) {
+    if (isNaN(timestamp)) {
+      return res.json(
+        signedResponse({
+          valid: false,
+          reason: 'STALE_REQUEST',
+          ts: Date.now().toString()
+        })
+      );
+    }
+
+    const age = Date.now() - timestamp;
+
+    if (Math.abs(age) > 60_000) {
       return res.json(
         signedResponse({
           valid: false,
@@ -253,11 +384,26 @@ app.post('/mod-auth', async (req, res) => {
 
     const expected = crypto
       .createHash('sha256')
-      .update(discord_id + hwid + ts + MOD_SECRET)
+      .update(
+        discord_id +
+        hwid +
+        ts +
+        MOD_SECRET
+      )
       .digest('hex');
 
-    if (expected !== signature) {
-      await logAuth('none', hwid, 'bad_signature', ip);
+    if (
+      !crypto.timingSafeEqual(
+        Buffer.from(expected),
+        Buffer.from(signature)
+      )
+    ) {
+      await logAuth(
+        'none',
+        hwid,
+        'bad_signature',
+        ip
+      );
 
       return res.json(
         signedResponse({
@@ -269,17 +415,24 @@ app.post('/mod-auth', async (req, res) => {
     }
 
     const row = await db.get(
-      `SELECT *
-       FROM license_keys
-       WHERE discord_id = $1
-         AND used = 1
-       ORDER BY redeemed_at DESC
-       LIMIT 1`,
+      `
+      SELECT *
+      FROM license_keys
+      WHERE discord_id = $1
+        AND used = 1
+      ORDER BY redeemed_at DESC
+      LIMIT 1
+      `,
       [discord_id]
     );
 
     if (!row) {
-      await logAuth('none', hwid, 'no_license', ip);
+      await logAuth(
+        'none',
+        hwid,
+        'no_license',
+        ip
+      );
 
       return res.json(
         signedResponse({
@@ -291,7 +444,12 @@ app.post('/mod-auth', async (req, res) => {
     }
 
     if (isExpired(row)) {
-      await logAuth(row.key, hwid, 'expired', ip);
+      await logAuth(
+        row.key,
+        hwid,
+        'expired',
+        ip
+      );
 
       return res.json(
         signedResponse({
@@ -304,10 +462,13 @@ app.post('/mod-auth', async (req, res) => {
 
     if (!row.hwid) {
       await db.run(
-        `UPDATE license_keys
-         SET hwid = $1,
-             hwid_locked_at = $2
-         WHERE key = $3`,
+        `
+        UPDATE license_keys
+        SET
+          hwid = $1,
+          hwid_locked_at = $2
+        WHERE key = $3
+        `,
         [
           hwid,
           new Date().toISOString(),
@@ -315,9 +476,19 @@ app.post('/mod-auth', async (req, res) => {
         ]
       );
 
-      await logAuth(row.key, hwid, 'ok_hwid_bound', ip);
+      await logAuth(
+        row.key,
+        hwid,
+        'ok_hwid_bound',
+        ip
+      );
     } else if (row.hwid !== hwid) {
-      await logAuth(row.key, hwid, 'hwid_mismatch', ip);
+      await logAuth(
+        row.key,
+        hwid,
+        'hwid_mismatch',
+        ip
+      );
 
       return res.json(
         signedResponse({
@@ -327,29 +498,39 @@ app.post('/mod-auth', async (req, res) => {
         })
       );
     } else {
-      await logAuth(row.key, hwid, 'ok', ip);
+      await logAuth(
+        row.key,
+        hwid,
+        'ok',
+        ip
+      );
     }
+
+    const sessionToken = crypto
+      .createHash('sha256')
+      .update(
+        discord_id +
+        hwid +
+        MOD_SECRET +
+        new Date().toDateString()
+      )
+      .digest('hex');
 
     return res.json(
       signedResponse({
         valid: true,
         plan: row.plan,
         reason: '',
-        session_token: crypto
-          .createHash('sha256')
-          .update(
-            discord_id +
-            hwid +
-            MOD_SECRET +
-            new Date().toDateString()
-          )
-          .digest('hex'),
+        session_token: sessionToken,
         ts: Date.now().toString()
       })
     );
 
   } catch (err) {
-    console.error('❌ /mod-auth error:', err);
+    console.error(
+      '❌ /mod-auth error:',
+      err
+    );
 
     return res.status(500).json({
       error: 'Internal server error'
@@ -359,11 +540,15 @@ app.post('/mod-auth', async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════
 //  HWID RESET
+//  POST /hwid-reset
 // ═══════════════════════════════════════════════════════════════
 
 app.post('/hwid-reset', async (req, res) => {
   try {
-    const { discord_id, key } = req.body;
+    const {
+      discord_id,
+      key
+    } = req.body;
 
     if (!discord_id || !key) {
       return res.status(400).json({
@@ -373,10 +558,12 @@ app.post('/hwid-reset', async (req, res) => {
     }
 
     const row = await db.get(
-      `SELECT *
-       FROM license_keys
-       WHERE key = $1
-         AND discord_id = $2`,
+      `
+      SELECT *
+      FROM license_keys
+      WHERE key = $1
+        AND discord_id = $2
+      `,
       [key, discord_id]
     );
 
@@ -410,30 +597,41 @@ app.post('/hwid-reset', async (req, res) => {
 
     const month = currentMonth();
 
-    let resetCount = row.hwid_reset_count || 0;
+    let resetCount =
+      row.hwid_reset_count || 0;
 
-    if (row.hwid_reset_month !== month) {
+    if (
+      row.hwid_reset_month !== month
+    ) {
       resetCount = 0;
     }
 
     if (resetCount >= 2) {
       return res.json({
         success: false,
-        error: `You have used both HWID resets for ${month}. Resets refresh on the 1st of next month.`,
+        error:
+          `You have used both HWID resets for ${month}. ` +
+          `Resets refresh on the 1st of next month.`,
         resets_used: resetCount,
         resets_left: 0
       });
     }
 
+    const newResetCount =
+      resetCount + 1;
+
     await db.run(
-      `UPDATE license_keys
-       SET hwid = NULL,
-           hwid_locked_at = NULL,
-           hwid_reset_count = $1,
-           hwid_reset_month = $2
-       WHERE key = $3`,
+      `
+      UPDATE license_keys
+      SET
+        hwid = NULL,
+        hwid_locked_at = NULL,
+        hwid_reset_count = $1,
+        hwid_reset_month = $2
+      WHERE key = $3
+      `,
       [
-        resetCount + 1,
+        newResetCount,
         month,
         key
       ]
@@ -441,13 +639,18 @@ app.post('/hwid-reset', async (req, res) => {
 
     return res.json({
       success: true,
-      resets_used: resetCount + 1,
-      resets_left: 2 - (resetCount + 1),
-      message: `HWID reset! Your next launch will bind to your new PC. You have ${2 - (resetCount + 1)} reset(s) left this month.`
+      resets_used: newResetCount,
+      resets_left: 2 - newResetCount,
+      message:
+        `HWID reset! Your next launch will bind to your new PC. ` +
+        `You have ${2 - newResetCount} reset(s) left this month.`
     });
 
   } catch (err) {
-    console.error('❌ /hwid-reset error:', err);
+    console.error(
+      '❌ /hwid-reset error:',
+      err
+    );
 
     return res.status(500).json({
       success: false,
@@ -456,557 +659,925 @@ app.post('/hwid-reset', async (req, res) => {
   }
 });
 
-app.get('/hwid-status/:discord_id', async (req, res) => {
-  try {
-    const row = await db.get(
-      `SELECT
-         hwid,
-         hwid_reset_count,
-         hwid_reset_month
-       FROM license_keys
-       WHERE discord_id = $1
-         AND used = 1
-       ORDER BY redeemed_at DESC
-       LIMIT 1`,
-      [req.params.discord_id]
-    );
+// ═══════════════════════════════════════════════════════════════
+//  HWID STATUS
+//  GET /hwid-status/:discord_id
+// ═══════════════════════════════════════════════════════════════
 
-    if (!row) {
+app.get(
+  '/hwid-status/:discord_id',
+  async (req, res) => {
+    try {
+      const row = await db.get(
+        `
+        SELECT
+          hwid,
+          hwid_reset_count,
+          hwid_reset_month
+        FROM license_keys
+        WHERE discord_id = $1
+          AND used = 1
+        ORDER BY redeemed_at DESC
+        LIMIT 1
+        `,
+        [req.params.discord_id]
+      );
+
+      if (!row) {
+        return res.json({
+          found: false
+        });
+      }
+
+      const month = currentMonth();
+
+      const resetCount =
+        row.hwid_reset_month === month
+          ? row.hwid_reset_count || 0
+          : 0;
+
       return res.json({
-        found: false
+        found: true,
+        hwid_bound: !!row.hwid,
+        resets_used: resetCount,
+        resets_left: 2 - resetCount
+      });
+
+    } catch (err) {
+      console.error(
+        '❌ /hwid-status error:',
+        err
+      );
+
+      return res.status(500).json({
+        error: 'Internal server error'
       });
     }
-
-    const month = currentMonth();
-
-    const resetCount =
-      row.hwid_reset_month === month
-        ? (row.hwid_reset_count || 0)
-        : 0;
-
-    return res.json({
-      found: true,
-      hwid_bound: !!row.hwid,
-      resets_used: resetCount,
-      resets_left: 2 - resetCount
-    });
-
-  } catch (err) {
-    console.error('❌ /hwid-status error:', err);
-
-    return res.status(500).json({
-      error: 'Internal server error'
-    });
   }
-});
+);
 
 // ═══════════════════════════════════════════════════════════════
 //  BOT ROUTES
 // ═══════════════════════════════════════════════════════════════
 
-app.post('/bot/genkey', requireBotSecret, async (req, res) => {
-  try {
-    const { plan, note } = req.body;
+// ── Generate one key ──────────────────────────────────────────
 
-    if (!['monthly', 'lifetime'].includes(plan)) {
-      return res.status(400).json({
-        error: 'plan must be monthly or lifetime'
-      });
-    }
-
-    const key = generateKey(plan);
-
-    await db.run(
-      `INSERT INTO license_keys
-        (key, plan, expires_at, used, created_at, note)
-       VALUES ($1, $2, NULL, 0, $3, $4)`,
-      [
-        key,
+app.post(
+  '/bot/genkey',
+  requireBotSecret,
+  async (req, res) => {
+    try {
+      const {
         plan,
-        new Date().toISOString(),
-        note || null
-      ]
-    );
+        note
+      } = req.body;
 
-    return res.json({
-      success: true,
-      key,
-      plan
-    });
+      if (
+        !['monthly', 'lifetime'].includes(plan)
+      ) {
+        return res.status(400).json({
+          error:
+            'plan must be monthly or lifetime'
+        });
+      }
 
-  } catch (err) {
-    console.error('❌ /bot/genkey error:', err);
+      const key =
+        generateKey(plan);
 
-    return res.status(500).json({
-      error: 'Internal server error'
-    });
-  }
-});
+      await db.run(
+        `
+        INSERT INTO license_keys
+          (
+            key,
+            plan,
+            expires_at,
+            used,
+            created_at,
+            note
+          )
+        VALUES
+          ($1, $2, NULL, 0, $3, $4)
+        `,
+        [
+          key,
+          plan,
+          new Date().toISOString(),
+          note || null
+        ]
+      );
 
-app.post('/bot/bulkgen', requireBotSecret, async (req, res) => {
-  try {
-    const { plan, note } = req.body;
+      return res.json({
+        success: true,
+        key,
+        plan
+      });
 
-    let { amount } = req.body;
+    } catch (err) {
+      console.error(
+        '❌ /bot/genkey error:',
+        err
+      );
 
-    amount = parseInt(amount, 10);
-
-    if (!['monthly', 'lifetime'].includes(plan)) {
-      return res.status(400).json({
-        error: 'plan must be monthly or lifetime'
+      return res.status(500).json({
+        error: 'Failed to generate key'
       });
     }
+  }
+);
 
-    if (!amount || amount < 1) {
-      return res.status(400).json({
-        error: 'amount must be at least 1'
+// ── Bulk generate ─────────────────────────────────────────────
+
+app.post(
+  '/bot/bulkgen',
+  requireBotSecret,
+  async (req, res) => {
+    try {
+      const {
+        plan,
+        note
+      } = req.body;
+
+      let {
+        amount
+      } = req.body;
+
+      amount = parseInt(
+        amount,
+        10
+      );
+
+      if (
+        !['monthly', 'lifetime'].includes(plan)
+      ) {
+        return res.status(400).json({
+          error:
+            'plan must be monthly or lifetime'
+        });
+      }
+
+      if (
+        !amount ||
+        amount < 1 ||
+        amount > 1000
+      ) {
+        return res.status(400).json({
+          error:
+            'amount must be between 1 and 1000'
+        });
+      }
+
+      const keys =
+        Array.from(
+          { length: amount },
+          () => generateKey(plan)
+        );
+
+      const now =
+        new Date().toISOString();
+
+      const values =
+        keys
+          .map(
+            (k, i) =>
+              `($${i * 4 + 1}, $${i * 4 + 2}, 0, $${i * 4 + 3}, $${i * 4 + 4})`
+          )
+          .join(', ');
+
+      const params =
+        keys.flatMap(
+          k => [
+            k,
+            plan,
+            now,
+            note || null
+          ]
+        );
+
+      await db.run(
+        `
+        INSERT INTO license_keys
+          (
+            key,
+            plan,
+            used,
+            created_at,
+            note
+          )
+        VALUES ${values}
+        `,
+        params
+      );
+
+      return res.json({
+        success: true,
+        keys,
+        plan,
+        amount: keys.length
+      });
+
+    } catch (err) {
+      console.error(
+        '❌ /bot/bulkgen error:',
+        err
+      );
+
+      return res.status(500).json({
+        error: 'Failed to generate keys'
       });
     }
-
-    const keys = Array.from(
-      { length: amount },
-      () => generateKey(plan)
-    );
-
-    const now = new Date().toISOString();
-
-    const values = keys
-      .map(
-        (_, i) =>
-          `($${i * 4 + 1}, $${i * 4 + 2}, 0, $${i * 4 + 3}, $${i * 4 + 4})`
-      )
-      .join(', ');
-
-    const params = keys.flatMap(k => [
-      k,
-      plan,
-      now,
-      note || null
-    ]);
-
-    await db.run(
-      `INSERT INTO license_keys
-        (key, plan, used, created_at, note)
-       VALUES ${values}`,
-      params
-    );
-
-    return res.json({
-      success: true,
-      keys,
-      plan,
-      amount: keys.length
-    });
-
-  } catch (err) {
-    console.error('❌ /bot/bulkgen error:', err);
-
-    return res.status(500).json({
-      error: 'Internal server error'
-    });
   }
-});
+);
 
-app.get('/bot/keyinfo/:key', requireBotSecret, async (req, res) => {
-  try {
-    const row = await db.get(
-      'SELECT * FROM license_keys WHERE key = $1',
-      [req.params.key]
-    );
+// ── Key info ──────────────────────────────────────────────────
 
-    if (!row) {
-      return res.status(404).json({
-        error: 'Key not found'
+app.get(
+  '/bot/keyinfo/:key',
+  requireBotSecret,
+  async (req, res) => {
+    try {
+      const row = await db.get(
+        `
+        SELECT *
+        FROM license_keys
+        WHERE key = $1
+        `,
+        [req.params.key]
+      );
+
+      if (!row) {
+        return res.status(404).json({
+          error: 'Key not found'
+        });
+      }
+
+      return res.json({
+        ...row,
+        expired: isExpired(row)
+      });
+
+    } catch (err) {
+      console.error(
+        '❌ /bot/keyinfo error:',
+        err
+      );
+
+      return res.status(500).json({
+        error: 'Internal server error'
       });
     }
-
-    return res.json({
-      ...row,
-      expired: isExpired(row)
-    });
-
-  } catch (err) {
-    console.error('❌ /bot/keyinfo error:', err);
-
-    return res.status(500).json({
-      error: 'Internal server error'
-    });
   }
-});
+);
 
-app.get('/bot/keyinfo/by-discord/:discord_id', requireBotSecret, async (req, res) => {
-  try {
-    const row = await db.get(
-      `SELECT *
-       FROM license_keys
-       WHERE discord_id = $1
-       ORDER BY redeemed_at DESC
-       LIMIT 1`,
-      [req.params.discord_id]
-    );
+// ── Key info by Discord ──────────────────────────────────────
 
-    if (!row) {
-      return res.status(404).json({
-        error: 'No license found for this Discord user'
+app.get(
+  '/bot/keyinfo/by-discord/:discord_id',
+  requireBotSecret,
+  async (req, res) => {
+    try {
+      const row = await db.get(
+        `
+        SELECT *
+        FROM license_keys
+        WHERE discord_id = $1
+        ORDER BY redeemed_at DESC
+        LIMIT 1
+        `,
+        [req.params.discord_id]
+      );
+
+      if (!row) {
+        return res.status(404).json({
+          error:
+            'No license found for this Discord user'
+        });
+      }
+
+      return res.json({
+        ...row,
+        expired: isExpired(row)
+      });
+
+    } catch (err) {
+      console.error(
+        '❌ /bot/keyinfo/by-discord error:',
+        err
+      );
+
+      return res.status(500).json({
+        error: 'Internal server error'
       });
     }
-
-    return res.json({
-      ...row,
-      expired: isExpired(row)
-    });
-
-  } catch (err) {
-    console.error('❌ /bot/keyinfo/by-discord error:', err);
-
-    return res.status(500).json({
-      error: 'Internal server error'
-    });
   }
-});
+);
 
-app.post('/bot/revokekey', requireBotSecret, async (req, res) => {
-  try {
-    const { key } = req.body;
+// ── Revoke key ────────────────────────────────────────────────
 
-    if (!await db.get(
-      'SELECT key FROM license_keys WHERE key = $1',
-      [key]
-    )) {
-      return res.status(404).json({
-        error: 'Key not found'
+app.post(
+  '/bot/revokekey',
+  requireBotSecret,
+  async (req, res) => {
+    try {
+      const {
+        key
+      } = req.body;
+
+      const exists =
+        await db.get(
+          `
+          SELECT key
+          FROM license_keys
+          WHERE key = $1
+          `,
+          [key]
+        );
+
+      if (!exists) {
+        return res.status(404).json({
+          error: 'Key not found'
+        });
+      }
+
+      await db.run(
+        `
+        DELETE FROM license_keys
+        WHERE key = $1
+        `,
+        [key]
+      );
+
+      return res.json({
+        success: true
+      });
+
+    } catch (err) {
+      console.error(
+        '❌ /bot/revokekey error:',
+        err
+      );
+
+      return res.status(500).json({
+        error: 'Internal server error'
       });
     }
-
-    await db.run(
-      'DELETE FROM license_keys WHERE key = $1',
-      [key]
-    );
-
-    return res.json({
-      success: true
-    });
-
-  } catch (err) {
-    console.error('❌ /bot/revokekey error:', err);
-
-    return res.status(500).json({
-      error: 'Internal server error'
-    });
   }
-});
+);
 
-app.post('/bot/resethwid', requireBotSecret, async (req, res) => {
-  try {
-    const { key } = req.body;
+// ── Admin HWID reset ──────────────────────────────────────────
 
-    if (!await db.get(
-      'SELECT key FROM license_keys WHERE key = $1',
-      [key]
-    )) {
-      return res.status(404).json({
-        error: 'Key not found'
+app.post(
+  '/bot/resethwid',
+  requireBotSecret,
+  async (req, res) => {
+    try {
+      const {
+        key
+      } = req.body;
+
+      const exists =
+        await db.get(
+          `
+          SELECT key
+          FROM license_keys
+          WHERE key = $1
+          `,
+          [key]
+        );
+
+      if (!exists) {
+        return res.status(404).json({
+          error: 'Key not found'
+        });
+      }
+
+      await db.run(
+        `
+        UPDATE license_keys
+        SET
+          hwid = NULL,
+          hwid_locked_at = NULL,
+          hwid_reset_count = 0,
+          hwid_reset_month = NULL
+        WHERE key = $1
+        `,
+        [key]
+      );
+
+      return res.json({
+        success: true,
+        message:
+          'HWID reset. Next launch will bind to new PC.'
+      });
+
+    } catch (err) {
+      console.error(
+        '❌ /bot/resethwid error:',
+        err
+      );
+
+      return res.status(500).json({
+        error: 'Internal server error'
       });
     }
-
-    await db.run(
-      `UPDATE license_keys
-       SET hwid = NULL,
-           hwid_locked_at = NULL,
-           hwid_reset_count = 0,
-           hwid_reset_month = NULL
-       WHERE key = $1`,
-      [key]
-    );
-
-    return res.json({
-      success: true,
-      message: 'HWID reset. Next launch will bind to new PC.'
-    });
-
-  } catch (err) {
-    console.error('❌ /bot/resethwid error:', err);
-
-    return res.status(500).json({
-      error: 'Internal server error'
-    });
   }
-});
+);
 
-app.get('/bot/listkeys', requireBotSecret, async (req, res) => {
-  try {
-    const { plan, unused } = req.query;
+// ── List keys ─────────────────────────────────────────────────
 
-    let sql = 'SELECT * FROM license_keys WHERE 1=1';
+app.get(
+  '/bot/listkeys',
+  requireBotSecret,
+  async (req, res) => {
+    try {
+      const {
+        plan,
+        unused
+      } = req.query;
 
-    const params = [];
+      let sql =
+        'SELECT * FROM license_keys WHERE 1=1';
 
-    let i = 1;
+      const params = [];
+      let i = 1;
 
-    if (plan) {
-      sql += ` AND plan = $${i++}`;
-      params.push(plan);
+      if (plan) {
+        sql += ` AND plan = $${i++}`;
+        params.push(plan);
+      }
+
+      if (unused) {
+        sql += ' AND used = 0';
+      }
+
+      sql +=
+        ' ORDER BY created_at DESC LIMIT 50';
+
+      return res.json(
+        await db.all(
+          sql,
+          params
+        )
+      );
+
+    } catch (err) {
+      console.error(
+        '❌ /bot/listkeys error:',
+        err
+      );
+
+      return res.status(500).json({
+        error: 'Internal server error'
+      });
     }
+  }
+);
 
-    if (unused) {
-      sql += ' AND used = 0';
+// ── Auth logs ─────────────────────────────────────────────────
+
+app.get(
+  '/bot/authlog',
+  requireBotSecret,
+  async (req, res) => {
+    try {
+      return res.json(
+        await db.all(
+          `
+          SELECT *
+          FROM auth_log
+          ORDER BY timestamp DESC
+          LIMIT 50
+          `
+        )
+      );
+
+    } catch (err) {
+      console.error(
+        '❌ /bot/authlog error:',
+        err
+      );
+
+      return res.status(500).json({
+        error: 'Internal server error'
+      });
     }
-
-    sql += ' ORDER BY created_at DESC LIMIT 50';
-
-    return res.json(
-      await db.all(sql, params)
-    );
-
-  } catch (err) {
-    console.error('❌ /bot/listkeys error:', err);
-
-    return res.status(500).json({
-      error: 'Internal server error'
-    });
   }
-});
-
-app.get('/bot/authlog', requireBotSecret, async (req, res) => {
-  try {
-    return res.json(
-      await db.all(
-        'SELECT * FROM auth_log ORDER BY timestamp DESC LIMIT 50'
-      )
-    );
-
-  } catch (err) {
-    console.error('❌ /bot/authlog error:', err);
-
-    return res.status(500).json({
-      error: 'Internal server error'
-    });
-  }
-});
+);
 
 // ═══════════════════════════════════════════════════════════════
 //  WEBSITE ROUTES
 // ═══════════════════════════════════════════════════════════════
 
-app.post('/redeem', async (req, res) => {
-  try {
-    const { discord_id, key } = req.body;
+// ── Redeem license ────────────────────────────────────────────
 
-    if (!discord_id || !key) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing fields'
-      });
-    }
+app.post(
+  '/redeem',
+  async (req, res) => {
+    try {
+      const {
+        discord_id,
+        key
+      } = req.body;
 
-    const row = await db.get(
-      'SELECT * FROM license_keys WHERE key = $1',
-      [key]
-    );
+      if (!discord_id || !key) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing fields'
+        });
+      }
 
-    if (!row) {
-      return res.json({
-        success: false,
-        error: 'Invalid or unknown key.'
-      });
-    }
+      const row =
+        await db.get(
+          `
+          SELECT *
+          FROM license_keys
+          WHERE key = $1
+          `,
+          [key]
+        );
 
-    if (row.used) {
-      if (row.discord_id === discord_id) {
+      if (!row) {
         return res.json({
-          success: true,
-          license: {
-            key: row.key,
-            plan: row.plan,
-            expires_at: row.expires_at,
-            redeemed_at: row.redeemed_at,
-            expired: isExpired(row)
-          }
+          success: false,
+          error:
+            'Invalid or unknown key.'
+        });
+      }
+
+      if (row.used) {
+        if (
+          row.discord_id === discord_id
+        ) {
+          return res.json({
+            success: true,
+            license: {
+              key: row.key,
+              plan: row.plan,
+              expires_at: row.expires_at,
+              redeemed_at: row.redeemed_at,
+              expired: isExpired(row)
+            }
+          });
+        }
+
+        return res.json({
+          success: false,
+          error:
+            'Key already used by another account.'
+        });
+      }
+
+      const now =
+        new Date().toISOString();
+
+      const expires_at =
+        row.plan === 'monthly'
+          ? addMonths(
+              new Date(),
+              1
+            )
+          : null;
+
+      await db.run(
+        `
+        UPDATE license_keys
+        SET
+          used = 1,
+          discord_id = $1,
+          redeemed_at = $2,
+          expires_at = $3
+        WHERE key = $4
+        `,
+        [
+          discord_id,
+          now,
+          expires_at,
+          key
+        ]
+      );
+
+      return res.json({
+        success: true,
+        license: {
+          key,
+          plan: row.plan,
+          expires_at,
+          redeemed_at: now,
+          expired: false
+        }
+      });
+
+    } catch (err) {
+      console.error(
+        '❌ /redeem error:',
+        err
+      );
+
+      return res.status(500).json({
+        success: false,
+        error: 'Internal server error'
+      });
+    }
+  }
+);
+
+// ── License lookup ────────────────────────────────────────────
+
+app.get(
+  '/license/:discord_id',
+  async (req, res) => {
+    try {
+      const row =
+        await db.get(
+          `
+          SELECT *
+          FROM license_keys
+          WHERE discord_id = $1
+          ORDER BY redeemed_at DESC
+          LIMIT 1
+          `,
+          [req.params.discord_id]
+        );
+
+      if (!row) {
+        return res.json({
+          has_license: false
         });
       }
 
       return res.json({
-        success: false,
-        error: 'Key already used by another account.'
+        has_license: true,
+        license: {
+          key: row.key,
+          plan: row.plan,
+          expires_at: row.expires_at,
+          redeemed_at: row.redeemed_at,
+          expired: isExpired(row)
+        }
+      });
+
+    } catch (err) {
+      console.error(
+        '❌ /license error:',
+        err
+      );
+
+      return res.status(500).json({
+        error: 'Internal server error'
       });
     }
-
-    const now = new Date().toISOString();
-
-    const expires_at =
-      row.plan === 'monthly'
-        ? addMonths(new Date(), 1)
-        : null;
-
-    await db.run(
-      `UPDATE license_keys
-       SET used = 1,
-           discord_id = $1,
-           redeemed_at = $2,
-           expires_at = $3
-       WHERE key = $4`,
-      [
-        discord_id,
-        now,
-        expires_at,
-        key
-      ]
-    );
-
-    return res.json({
-      success: true,
-      license: {
-        key,
-        plan: row.plan,
-        expires_at,
-        redeemed_at: now,
-        expired: false
-      }
-    });
-
-  } catch (err) {
-    console.error('❌ /redeem error:', err);
-
-    return res.status(500).json({
-      success: false,
-      error: 'Internal server error'
-    });
   }
-});
-
-app.get('/license/:discord_id', async (req, res) => {
-  try {
-    const row = await db.get(
-      `SELECT *
-       FROM license_keys
-       WHERE discord_id = $1
-       ORDER BY redeemed_at DESC
-       LIMIT 1`,
-      [req.params.discord_id]
-    );
-
-    if (!row) {
-      return res.json({
-        has_license: false
-      });
-    }
-
-    return res.json({
-      has_license: true,
-      license: {
-        key: row.key,
-        plan: row.plan,
-        expires_at: row.expires_at,
-        redeemed_at: row.redeemed_at,
-        expired: isExpired(row)
-      }
-    });
-
-  } catch (err) {
-    console.error('❌ /license error:', err);
-
-    return res.status(500).json({
-      error: 'Internal server error'
-    });
-  }
-});
+);
 
 // ═══════════════════════════════════════════════════════════════
 //  DOWNLOAD
 //  GET /download/:filename
 // ═══════════════════════════════════════════════════════════════
 
-app.get('/download/:filename', async (req, res) => {
-  try {
-    const { discord_id, key } = req.query;
-
-    if (!discord_id || !key) {
-      return res.status(403).send('Missing credentials');
-    }
-
-    const row = await db.get(
-      `SELECT *
-       FROM license_keys
-       WHERE key = $1
-         AND discord_id = $2`,
-      [key, discord_id]
-    );
-
-    if (!row || !row.used || isExpired(row)) {
-      return res.status(403).send('No valid license.');
-    }
-
-    const jarPath = findJar();
-
-    if (!jarPath) {
-      return res.status(404).send(
-        'File not found. Please contact support.'
-      );
-    }
-
-    const zip = new AdmZip(jarPath);
-
-    zip.addFile(
-      'blizzard_user.txt',
-      Buffer.from(discord_id, 'utf8')
-    );
-
-    const outputBuffer = zip.toBuffer();
-
-    await db.run(
-      `INSERT INTO downloads
-        (discord_id, key_used, downloaded_at)
-       VALUES ($1, $2, $3)`,
-      [
+app.get(
+  '/download/:filename',
+  async (req, res) => {
+    try {
+      const {
         discord_id,
-        key,
-        new Date().toISOString()
-      ]
-    );
+        key
+      } = req.query;
 
-    res.setHeader(
-      'Content-Disposition',
-      'attachment; filename="BlizzardClient.jar"'
-    );
+      if (!discord_id || !key) {
+        return res
+          .status(403)
+          .send('Missing credentials');
+      }
 
-    res.setHeader(
-      'Content-Type',
-      'application/java-archive'
-    );
+      const row =
+        await db.get(
+          `
+          SELECT *
+          FROM license_keys
+          WHERE key = $1
+            AND discord_id = $2
+          `,
+          [
+            key,
+            discord_id
+          ]
+        );
 
-    return res.send(outputBuffer);
+      if (
+        !row ||
+        !row.used ||
+        isExpired(row)
+      ) {
+        return res
+          .status(403)
+          .send('No valid license.');
+      }
 
-  } catch (err) {
-    console.error('❌ Jar injection failed:', err);
+      const jarPath =
+        findJar();
 
-    return res.status(500).send(
-      'Failed to generate mod file.'
-    );
+      if (!jarPath) {
+        return res
+          .status(404)
+          .send(
+            'File not found. Please contact support.'
+          );
+      }
+
+      const zip =
+        new AdmZip(jarPath);
+
+      zip.addFile(
+        'blizzard_user.txt',
+        Buffer.from(
+          discord_id,
+          'utf8'
+        )
+      );
+
+      const outputBuffer =
+        zip.toBuffer();
+
+      await db.run(
+        `
+        INSERT INTO downloads
+          (
+            discord_id,
+            key_used,
+            downloaded_at
+          )
+        VALUES
+          ($1, $2, $3)
+        `,
+        [
+          discord_id,
+          key,
+          new Date().toISOString()
+        ]
+      );
+
+      res.setHeader(
+        'Content-Disposition',
+        'attachment; filename="BlizzardClient.jar"'
+      );
+
+      res.setHeader(
+        'Content-Type',
+        'application/java-archive'
+      );
+
+      res.setHeader(
+        'Content-Length',
+        outputBuffer.length
+      );
+
+      return res.send(
+        outputBuffer
+      );
+
+    } catch (err) {
+      console.error(
+        '❌ Jar injection failed:',
+        err
+      );
+
+      return res
+        .status(500)
+        .send(
+          'Failed to generate mod file.'
+        );
+    }
   }
-});
+);
 
 // ═══════════════════════════════════════════════════════════════
-//  START
+//  404 HANDLER
 // ═══════════════════════════════════════════════════════════════
 
-app.listen(PORT, () => {
-  console.log(`✅ Blizzard API running on port ${PORT}`);
-  console.log(`🌐 Listening on port ${PORT}`);
-});
+app.use(
+  (req, res) => {
+    res.status(404).json({
+      error: 'Route not found'
+    });
+  }
+);
 
-// ── DATABASE INITIALIZATION ──────────────────────────────────
-pool.connect()
-  .then(client => {
+// ═══════════════════════════════════════════════════════════════
+//  ERROR HANDLER
+// ═══════════════════════════════════════════════════════════════
+
+app.use(
+  (err, req, res, next) => {
+    console.error(
+      '❌ Express error:',
+      err
+    );
+
+    res.status(500).json({
+      error: 'Internal server error'
+    });
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════
+//  START SERVER
+// ═══════════════════════════════════════════════════════════════
+
+app.listen(
+  PORT,
+  () => {
+    console.log('');
+    console.log(
+      '══════════════════════════════════════'
+    );
+    console.log(
+      '🧊 BLIZZARD API'
+    );
+    console.log(
+      '══════════════════════════════════════'
+    );
+    console.log(
+      `✅ API listening on port ${PORT}`
+    );
+    console.log(
+      `🌐 Website: https://blizzardweb.exasty.workers.dev`
+    );
+    console.log(
+      `🗄️ Database: Supabase PostgreSQL`
+    );
+    console.log(
+      `📦 JAR: ${fs.existsSync(JAR_PATH) ? 'FOUND' : 'NOT FOUND'}`
+    );
+    console.log(
+      '══════════════════════════════════════'
+    );
+    console.log('');
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════
+//  DATABASE CONNECTION + INITIALIZATION
+// ═══════════════════════════════════════════════════════════════
+
+(async () => {
+  try {
+    const client =
+      await pool.connect();
+
+    console.log(
+      '✅ Supabase PostgreSQL connected'
+    );
+
     client.release();
 
-    console.log('✅ DB connected');
+    await initDB();
 
-    return initDB();
-  })
-  .then(() => {
-    console.log('✅ DB initialised');
-  })
-  .catch(err => {
-    console.error('❌ DB init failed:', err.message);
+    console.log(
+      '✅ Database initialized successfully'
+    );
+
+  } catch (err) {
+    console.error(
+      '❌ Database initialization failed:',
+      err.message
+    );
+
     process.exit(1);
-  });
+  }
+})();
+
+// ═══════════════════════════════════════════════════════════════
+//  GRACEFUL SHUTDOWN
+// ═══════════════════════════════════════════════════════════════
+
+async function shutdown(signal) {
+  console.log(
+    `\n⚠️ ${signal} received — shutting down...`
+  );
+
+  try {
+    await pool.end();
+
+    console.log(
+      '✅ Database connection closed'
+    );
+
+    process.exit(0);
+  } catch (err) {
+    console.error(
+      '❌ Shutdown error:',
+      err
+    );
+
+    process.exit(1);
+  }
+}
+
+process.on(
+  'SIGTERM',
+  () => shutdown('SIGTERM')
+);
+
+process.on(
+  'SIGINT',
+  () => shutdown('SIGINT')
+);
